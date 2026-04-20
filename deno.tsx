@@ -8,6 +8,18 @@ const userID = "93f6e6d0-9593-4104-8991-f28bb00d59a0";
 
 // 2. 后台路径：域名 + UUID
 const ADMIN_PATH = `/${userID}`;
+const textDecoder = new TextDecoder();
+const textEncoder = new TextEncoder();
+const expectedUUID = parseUUID(userID);
+const VLESS_VERSION = 0;
+const VLESS_COMMAND_TCP = 1;
+const VLESS_HEADER_RESPONSE = new Uint8Array([VLESS_VERSION, 0]);
+const WS_READY_STATE_OPEN = 1;
+const WS_READY_STATE_CONNECTING = 0;
+const HTML_HEADERS = {
+    "Content-Type": "text/html; charset=utf-8",
+    "Cache-Control": "no-store, no-cache, must-revalidate",
+};
 
 // 3. 伪装网页
 const CAMOUFLAGE_HTML = `
@@ -39,10 +51,7 @@ const CAMOUFLAGE_HTML = `
 function html(body: string, status = 200) {
     return new Response(body, {
         status,
-        headers: {
-            "Content-Type": "text/html; charset=utf-8",
-            "Cache-Control": "no-store, no-cache, must-revalidate",
-        },
+        headers: HTML_HEADERS,
     });
 }
 
@@ -53,6 +62,231 @@ function escapeHtml(str: string) {
         .replaceAll(">", "&gt;")
         .replaceAll('"', "&quot;")
         .replaceAll("'", "&#39;");
+}
+
+function parseUUID(uuid: string) {
+    const hex = uuid.replaceAll("-", "");
+    if (!/^[\da-f]{32}$/i.test(hex)) {
+        throw new Error("Invalid UUID format");
+    }
+
+    const bytes = new Uint8Array(16);
+    for (let i = 0; i < 16; i++) {
+        bytes[i] = parseInt(hex.slice(i * 2, i * 2 + 2), 16);
+    }
+    return bytes;
+}
+
+function isValidUUID(buffer: Uint8Array) {
+    if (buffer.length < expectedUUID.length) return false;
+    for (let i = 0; i < expectedUUID.length; i++) {
+        if (buffer[i] !== expectedUUID[i]) return false;
+    }
+    return true;
+}
+
+function decodeBase64Url(value: string) {
+    const normalized = value.replaceAll("-", "+").replaceAll("_", "/");
+    const padded = normalized.padEnd(Math.ceil(normalized.length / 4) * 4, "=");
+    return Uint8Array.from(atob(padded), (char) => char.charCodeAt(0));
+}
+
+async function toUint8Array(data: string | ArrayBufferLike | Blob) {
+    if (typeof data === "string") {
+        return textEncoder.encode(data);
+    }
+    if (data instanceof Blob) {
+        return new Uint8Array(await data.arrayBuffer());
+    }
+    return new Uint8Array(data);
+}
+
+function closeSocket(socket: WebSocket, code = 1008, reason = "Invalid request") {
+    try {
+        if (socket.readyState === WS_READY_STATE_OPEN || socket.readyState === WS_READY_STATE_CONNECTING) {
+            socket.close(code, reason);
+        }
+    } catch {
+    }
+}
+
+type TargetConnection = {
+    writer: WritableStreamDefaultWriter<Uint8Array>;
+    conn: Deno.TcpConn;
+};
+
+function closeTarget(target: TargetConnection | null) {
+    if (!target) return;
+    void target.writer.close().catch(() => {});
+    try {
+        target.conn.close();
+    } catch {
+    }
+}
+
+function readIPv6(buffer: Uint8Array, start: number) {
+    const ipv6Parts = [];
+    for (let i = 0; i < 16; i += 2) {
+        ipv6Parts.push(((buffer[start + i] << 8) | buffer[start + i + 1]).toString(16));
+    }
+    return ipv6Parts.join(":");
+}
+
+type VlessRequest = {
+    targetAddress: string;
+    targetPort: number;
+    payload: Uint8Array;
+};
+
+type DashboardItem = {
+    label: string;
+    value: string;
+    escape?: boolean;
+};
+
+function parseVlessRequest(buffer: Uint8Array): VlessRequest {
+    if (buffer.length < 24) {
+        throw new Error("VLESS request too short");
+    }
+
+    if (buffer[0] !== VLESS_VERSION) {
+        throw new Error("Unsupported VLESS version");
+    }
+
+    if (!isValidUUID(buffer.subarray(1, 17))) {
+        throw new Error("Invalid UUID");
+    }
+
+    const optLength = buffer[17];
+    const commandIndex = 18 + optLength;
+    const portIndex = commandIndex + 1;
+    if (buffer.length < portIndex + 3) {
+        throw new Error("Invalid VLESS header length");
+    }
+
+    const command = buffer[commandIndex];
+    if (command !== VLESS_COMMAND_TCP) {
+        throw new Error("Unsupported VLESS command");
+    }
+
+    const targetPort = (buffer[portIndex] << 8) | buffer[portIndex + 1];
+    if (targetPort < 1 || targetPort > 65535) {
+        throw new Error("Invalid target port");
+    }
+
+    let addressIndex = portIndex + 2;
+    const addressType = buffer[addressIndex++];
+
+    let targetAddress = "";
+    if (addressType === 1) {
+        if (buffer.length < addressIndex + 4) {
+            throw new Error("Invalid IPv4 address");
+        }
+        targetAddress = buffer.slice(addressIndex, addressIndex + 4).join(".");
+        addressIndex += 4;
+    } else if (addressType === 2) {
+        const domainLength = buffer[addressIndex++];
+        if (!domainLength || buffer.length < addressIndex + domainLength) {
+            throw new Error("Invalid domain address");
+        }
+        targetAddress = textDecoder.decode(buffer.slice(addressIndex, addressIndex + domainLength));
+        if (!targetAddress.trim()) {
+            throw new Error("Empty domain address");
+        }
+        addressIndex += domainLength;
+    } else if (addressType === 3) {
+        if (buffer.length < addressIndex + 16) {
+            throw new Error("Invalid IPv6 address");
+        }
+        targetAddress = readIPv6(buffer, addressIndex);
+        addressIndex += 16;
+    } else {
+        throw new Error("Unsupported address type");
+    }
+
+    if (!targetAddress) {
+        throw new Error("Empty target address");
+    }
+
+    return {
+        targetAddress,
+        targetPort,
+        payload: buffer.slice(addressIndex),
+    };
+}
+
+function getEarlyData(req: Request) {
+    const protocol = req.headers.get("sec-websocket-protocol");
+    if (!protocol) return null;
+
+    const candidates = protocol
+        .split(",")
+        .map((item) => item.trim())
+        .filter(Boolean);
+
+    const candidate = candidates.find((item) =>
+        /^[A-Za-z0-9_-]+$/.test(item) && item.length >= 24
+    );
+    if (!candidate || candidate.length < 24) return null;
+
+    try {
+        return decodeBase64Url(candidate);
+    } catch {
+        return null;
+    }
+}
+
+async function pipeTcpToWebSocket(socket: WebSocket, readable: ReadableStream<Uint8Array>) {
+    const reader = readable.getReader();
+    try {
+        while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            if (socket.readyState !== WS_READY_STATE_OPEN) break;
+            socket.send(value);
+        }
+    } finally {
+        try { reader.releaseLock(); } catch {}
+        closeSocket(socket, 1000, "TCP closed");
+    }
+}
+
+function shouldHandleWebSocket(req: Request) {
+    return req.headers.get("upgrade")?.toLowerCase() === "websocket";
+}
+
+function handleHttp(req: Request) {
+    const url = new URL(req.url);
+    if (url.pathname === ADMIN_PATH) {
+        return html(buildAdminHtml(req));
+    }
+    return html(CAMOUFLAGE_HTML);
+}
+
+async function connectTarget(socket: WebSocket, firstChunk: Uint8Array): Promise<TargetConnection> {
+    const { targetAddress, targetPort, payload } = parseVlessRequest(firstChunk);
+    const conn = await Deno.connect({
+        hostname: targetAddress,
+        port: targetPort,
+    });
+
+    const writer = conn.writable.getWriter();
+
+    socket.send(VLESS_HEADER_RESPONSE);
+    if (payload.length > 0) {
+        await writer.write(payload);
+    }
+
+    void pipeTcpToWebSocket(socket, conn.readable);
+    return { writer, conn };
+}
+
+function renderDashboardCards(items: DashboardItem[]) {
+    return items.map(({ label, value, escape = true }) => `
+                <div class="card">
+                    <div class="label">${escapeHtml(label)}</div>
+                    <div class="value mono">${escape ? escapeHtml(value) : value}</div>
+                </div>`).join("");
 }
 
 function buildAdminHtml(req: Request) {
@@ -72,6 +306,18 @@ function buildAdminHtml(req: Request) {
 
     const deploymentId = Deno.env.get("DENO_DEPLOYMENT_ID") ?? "unknown";
     const region = Deno.env.get("DENO_REGION") ?? "global";
+    const cards = renderDashboardCards([
+        { label: "域名", value: host },
+        { label: "协议", value: protocol, escape: false },
+        { label: "传输", value: transport, escape: false },
+        { label: "TLS", value: tls, escape: false },
+        { label: "端口", value: port, escape: false },
+        { label: "WebSocket 路径", value: wsPath },
+        { label: "后台地址", value: origin + dashboardPath },
+        { label: "UUID", value: userID },
+        { label: "部署 ID", value: deploymentId },
+        { label: "区域", value: region },
+    ]);
 
     return `
 <!DOCTYPE html>
@@ -222,46 +468,7 @@ function buildAdminHtml(req: Request) {
             <p class="sub">当前页面用于查看连接参数、协议类型、路径信息与部署状态。</p>
 
             <div class="grid">
-                <div class="card">
-                    <div class="label">域名</div>
-                    <div class="value mono">${escapeHtml(host)}</div>
-                </div>
-                <div class="card">
-                    <div class="label">协议</div>
-                    <div class="value mono">${protocol}</div>
-                </div>
-                <div class="card">
-                    <div class="label">传输</div>
-                    <div class="value mono">${transport}</div>
-                </div>
-                <div class="card">
-                    <div class="label">TLS</div>
-                    <div class="value mono">${tls}</div>
-                </div>
-                <div class="card">
-                    <div class="label">端口</div>
-                    <div class="value mono">${port}</div>
-                </div>
-                <div class="card">
-                    <div class="label">WebSocket 路径</div>
-                    <div class="value mono">${escapeHtml(wsPath)}</div>
-                </div>
-                <div class="card">
-                    <div class="label">后台地址</div>
-                    <div class="value mono">${escapeHtml(origin + dashboardPath)}</div>
-                </div>
-                <div class="card">
-                    <div class="label">UUID</div>
-                    <div class="value mono">${escapeHtml(userID)}</div>
-                </div>
-                <div class="card">
-                    <div class="label">部署 ID</div>
-                    <div class="value mono">${escapeHtml(deploymentId)}</div>
-                </div>
-                <div class="card">
-                    <div class="label">区域</div>
-                    <div class="value mono">${escapeHtml(region)}</div>
-                </div>
+${cards}
             </div>
 
             <div class="bigbox">
@@ -283,10 +490,20 @@ function buildAdminHtml(req: Request) {
     </div>
 
     <script>
-        function copyText(id) {
+        async function copyText(id) {
             const el = document.getElementById(id);
-            el.select();
-            el.setSelectionRange(0, 99999);
+            if (!el) return;
+            const text = el.value || el.textContent || '';
+            try {
+                if (navigator.clipboard && window.isSecureContext) {
+                    await navigator.clipboard.writeText(text);
+                    return;
+                }
+            } catch (_) {}
+            if (typeof el.select === 'function') {
+                el.select();
+                el.setSelectionRange(0, 99999);
+            }
             document.execCommand('copy');
         }
     </script>
@@ -296,131 +513,63 @@ function buildAdminHtml(req: Request) {
 }
 
 Deno.serve(async (req) => {
-    const url = new URL(req.url);
-    const upgrade = req.headers.get("upgrade") || "";
-
-    // 普通 HTTP 请求
-    if (upgrade.toLowerCase() !== "websocket") {
-        // 访问 /UUID 打开后台
-        if (url.pathname === ADMIN_PATH) {
-            return html(buildAdminHtml(req));
-        }
-
-        // 其他路径显示伪装页
-        return html(CAMOUFLAGE_HTML);
+    if (!shouldHandleWebSocket(req)) {
+        return handleHttp(req);
     }
 
-    // WebSocket 代理请求
     const { socket, response } = Deno.upgradeWebSocket(req);
+    let target: TargetConnection | null = null;
+    let connecting: Promise<TargetConnection> | null = null;
+    let queue: Promise<void> = Promise.resolve();
+    const earlyData = getEarlyData(req);
 
-    socket.onopen = () => {};
+    const cleanup = () => {
+        closeTarget(target);
+        target = null;
+        connecting = null;
+    };
 
-    socket.onmessage = async (event) => {
-        try {
-            const buffer = new Uint8Array(event.data as ArrayBuffer);
+    const enqueue = (fn: () => Promise<void>) => {
+        queue = queue.then(fn).catch(() => {
+            cleanup();
+            closeSocket(socket);
+        });
+    };
 
-            // 验证 VLESS 协议版本
-            if (buffer[0] !== 0) {
-                socket.close();
-                return;
-            }
-
-            // 解析并验证 UUID
-            const incomingUUID = buffer.slice(1, 17);
-            const expectedUUID = new Uint8Array(
-                userID.match(/[\da-f]{2}/gi)!.map((h) => parseInt(h, 16))
-            );
-
-            let isValid = true;
-            for (let i = 0; i < 16; i++) {
-                if (incomingUUID[i] !== expectedUUID[i]) isValid = false;
-            }
-
-            if (!isValid) {
-                socket.close();
-                return;
-            }
-
-            // 解析目标地址与端口
-            const optLength = buffer[17];
-            const command = buffer[18 + optLength];
-            const portIndex = 18 + optLength + 1;
-            const targetPort = (buffer[portIndex] << 8) | buffer[portIndex + 1];
-
-            let addressIndex = portIndex + 2;
-            const addressType = buffer[addressIndex];
-            addressIndex++;
-
-            let targetAddress = "";
-            if (addressType === 1) {
-                targetAddress = buffer.slice(addressIndex, addressIndex + 4).join(".");
-                addressIndex += 4;
-            } else if (addressType === 2) {
-                const domainLength = buffer[addressIndex];
-                addressIndex++;
-                targetAddress = new TextDecoder().decode(
-                    buffer.slice(addressIndex, addressIndex + domainLength)
-                );
-                addressIndex += domainLength;
-            } else if (addressType === 3) {
-                const ipv6Parts = [];
-                for (let i = 0; i < 16; i += 2) {
-                    ipv6Parts.push(
-                        ((buffer[addressIndex + i] << 8) | buffer[addressIndex + i + 1]).toString(16)
-                    );
-                }
-                targetAddress = ipv6Parts.join(":");
-                addressIndex += 16;
-            }
-
-            // 只处理 CONNECT 请求
-            if (command === 1) {
-                const targetConn = await Deno.connect({
-                    hostname: targetAddress,
-                    port: targetPort,
-                });
-
-                // 返回 VLESS 握手成功响应
-                socket.send(new Uint8Array([buffer[0], 0]));
-
-                // 发送初始载荷数据
-                const initialData = buffer.slice(addressIndex);
-                if (initialData.length > 0) {
-                    await targetConn.write(initialData);
-                }
-
-                // 建立双向数据流管道
-                const tcpToWs = async () => {
-                    const tempBuf = new Uint8Array(32768);
-                    try {
-                        while (true) {
-                            const n = await targetConn.read(tempBuf);
-                            if (n === null) break;
-                            socket.send(tempBuf.subarray(0, n));
-                        }
-                    } catch {
-                    } finally {
-                        socket.close();
-                    }
-                };
-
-                const wsToTcp = async (data: ArrayBuffer) => {
-                    try {
-                        await targetConn.write(new Uint8Array(data));
-                    } catch {
-                        targetConn.close();
-                    }
-                };
-
-                socket.onmessage = (e) => wsToTcp(e.data);
-                socket.onclose = () => targetConn.close();
-                socket.onerror = () => targetConn.close();
-
-                tcpToWs();
-            }
-        } catch {
-            socket.close();
+    const ensureConnection = async (buffer: Uint8Array) => {
+        if (target) return;
+        if (!connecting) {
+            connecting = connectTarget(socket, buffer);
         }
+        try {
+            target = await connecting;
+        } finally {
+            connecting = null;
+        }
+    };
+
+    socket.onopen = () => {
+        if (!earlyData?.length) return;
+        enqueue(async () => {
+            await ensureConnection(earlyData);
+        });
+    };
+
+    socket.onmessage = (event) => {
+        enqueue(async () => {
+            const buffer = await toUint8Array(event.data);
+            if (target) {
+                await target.writer.write(buffer);
+                return;
+            }
+            await ensureConnection(buffer);
+        });
+    };
+
+    socket.onclose = () => cleanup();
+    socket.onerror = () => {
+        cleanup();
+        closeSocket(socket);
     };
 
     return response;
