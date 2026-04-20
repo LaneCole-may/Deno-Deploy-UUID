@@ -281,12 +281,12 @@ async function connectTarget(socket: WebSocket, firstChunk: Uint8Array): Promise
     return { writer, conn };
 }
 
-function renderDashboardCards(items: DashboardItem[]) {
+function renderDashboardRows(items: DashboardItem[]) {
     return items.map(({ label, value, escape = true }) => `
-                <div class="card">
-                    <div class="label">${escapeHtml(label)}</div>
-                    <div class="value mono">${escape ? escapeHtml(value) : value}</div>
-                </div>`).join("");
+                    <tr>
+                        <td class="param-label">${escapeHtml(label)}</td>
+                        <td class="param-value">${escape ? escapeHtml(value) : value}</td>
+                    </tr>`).join("");
 }
 
 function buildAdminHtml(req: Request) {
@@ -306,15 +306,15 @@ function buildAdminHtml(req: Request) {
 
     const deploymentId = Deno.env.get("DENO_DEPLOYMENT_ID") ?? "unknown";
     const region = Deno.env.get("DENO_REGION") ?? "global";
-    const cards = renderDashboardCards([
+    const rows = renderDashboardRows([
         { label: "域名", value: host },
         { label: "协议", value: protocol, escape: false },
         { label: "传输", value: transport, escape: false },
         { label: "TLS", value: tls, escape: false },
         { label: "端口", value: port, escape: false },
-        { label: "WebSocket 路径", value: wsPath },
-        { label: "后台地址", value: origin + dashboardPath },
+        { label: "路径", value: wsPath },
         { label: "UUID", value: userID },
+        { label: "后台地址", value: origin + dashboardPath },
         { label: "部署 ID", value: deploymentId },
         { label: "区域", value: region },
     ]);
@@ -327,184 +327,245 @@ function buildAdminHtml(req: Request) {
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>节点后台</title>
     <style>
-        :root {
-            --bg: #0b1020;
-            --panel: #121a2b;
-            --panel2: #182338;
-            --text: #e8eefc;
-            --muted: #9fb0d1;
-            --line: #2a3856;
-            --ok: #22c55e;
-            --accent: #60a5fa;
-            --accent2: #93c5fd;
-        }
-        * { box-sizing: border-box; }
+        * { box-sizing: border-box; margin: 0; padding: 0; }
         body {
-            margin: 0;
             font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-            background: linear-gradient(180deg, #09101d 0%, #0f172a 100%);
-            color: var(--text);
+            background: #fafafa;
+            color: #1a1a1a;
+            line-height: 1.6;
+            -webkit-font-smoothing: antialiased;
         }
         .wrap {
-            max-width: 980px;
+            max-width: 640px;
             margin: 0 auto;
-            padding: 32px 20px 56px;
+            padding: 48px 24px 64px;
         }
-        .hero {
-            background: linear-gradient(135deg, #172554 0%, #0f172a 60%, #111827 100%);
-            border: 1px solid var(--line);
-            border-radius: 20px;
-            padding: 28px;
-            box-shadow: 0 10px 30px rgba(0,0,0,.25);
+        header {
+            margin-bottom: 40px;
         }
-        .badge {
+        .status {
             display: inline-flex;
             align-items: center;
-            gap: 8px;
-            padding: 6px 10px;
-            border-radius: 999px;
-            background: rgba(34,197,94,.12);
-            color: #bbf7d0;
+            gap: 6px;
             font-size: 13px;
-            border: 1px solid rgba(34,197,94,.2);
+            color: #22c55e;
+            margin-bottom: 12px;
         }
-        .dot {
-            width: 8px;
-            height: 8px;
+        .status::before {
+            content: "";
+            display: inline-block;
+            width: 6px;
+            height: 6px;
             border-radius: 50%;
-            background: var(--ok);
-            box-shadow: 0 0 12px var(--ok);
+            background: #22c55e;
         }
         h1 {
-            margin: 16px 0 8px;
-            font-size: 32px;
-            line-height: 1.15;
+            font-size: 22px;
+            font-weight: 600;
+            letter-spacing: -0.02em;
+            color: #111;
         }
-        .sub {
-            color: var(--muted);
-            margin: 0;
-            line-height: 1.7;
+        .desc {
+            font-size: 14px;
+            color: #888;
+            margin-top: 4px;
         }
-        .grid {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
-            gap: 16px;
-            margin-top: 22px;
+        section {
+            margin-bottom: 32px;
+        }
+        .section-title {
+            font-size: 11px;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.06em;
+            color: #999;
+            margin-bottom: 12px;
         }
         .card {
-            background: rgba(255,255,255,.03);
-            border: 1px solid var(--line);
-            border-radius: 16px;
-            padding: 18px;
+            background: #fff;
+            border: 1px solid #e5e7eb;
+            border-radius: 10px;
+            overflow: hidden;
         }
-        .label {
-            color: var(--muted);
+        table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+        tr + tr {
+            border-top: 1px solid #f0f0f0;
+        }
+        td {
+            padding: 11px 16px;
+            font-size: 14px;
+        }
+        .param-label {
+            color: #888;
+            width: 96px;
+            white-space: nowrap;
+        }
+        .param-value {
+            font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
             font-size: 13px;
-            margin-bottom: 8px;
-        }
-        .value {
-            font-size: 16px;
-            line-height: 1.6;
+            color: #333;
             word-break: break-all;
         }
-        .mono {
-            font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+        .link-box {
+            background: #fff;
+            border: 1px solid #e5e7eb;
+            border-radius: 10px;
+            padding: 16px;
         }
-        .bigbox {
-            margin-top: 22px;
-            background: var(--panel);
-            border: 1px solid var(--line);
-            border-radius: 18px;
-            padding: 20px;
+        .link-content {
+            background: #f7f7f8;
+            border: 1px solid #ebebeb;
+            border-radius: 6px;
+            padding: 12px 14px;
+            font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+            font-size: 12px;
+            color: #444;
+            line-height: 1.7;
+            word-break: break-all;
+            max-height: 120px;
+            overflow-y: auto;
         }
-        textarea {
-            width: 100%;
-            min-height: 120px;
-            resize: vertical;
-            border: 1px solid var(--line);
-            background: var(--panel2);
-            color: var(--text);
-            border-radius: 12px;
-            padding: 14px;
-            font-size: 14px;
-            line-height: 1.6;
-        }
-        .actions {
+        .link-actions {
+            margin-top: 12px;
             display: flex;
-            flex-wrap: wrap;
-            gap: 12px;
-            margin-top: 14px;
+            gap: 8px;
         }
-        button, a.btn {
-            appearance: none;
-            border: 0;
+        .btn {
+            display: inline-flex;
+            align-items: center;
+            gap: 5px;
+            padding: 8px 14px;
+            font-size: 13px;
+            font-weight: 500;
+            border: 1px solid #d1d5db;
+            border-radius: 6px;
+            background: #fff;
+            color: #333;
             cursor: pointer;
-            border-radius: 12px;
-            padding: 12px 16px;
-            color: white;
-            text-decoration: none;
-            background: linear-gradient(135deg, var(--accent), var(--accent2));
-            font-weight: 600;
+            transition: background 0.15s, border-color 0.15s;
+        }
+        .btn:hover {
+            background: #f5f5f5;
+            border-color: #bbb;
+        }
+        .btn:active {
+            background: #eee;
+        }
+        .btn-primary {
+            background: #111;
+            color: #fff;
+            border-color: #111;
+        }
+        .btn-primary:hover {
+            background: #333;
+            border-color: #333;
+        }
+        .btn-primary:active {
+            background: #000;
+        }
+        .toast {
+            position: fixed;
+            bottom: 24px;
+            left: 50%;
+            transform: translateX(-50%) translateY(20px);
+            background: #111;
+            color: #fff;
+            padding: 8px 16px;
+            border-radius: 6px;
+            font-size: 13px;
+            opacity: 0;
+            transition: opacity 0.2s, transform 0.2s;
+            pointer-events: none;
+        }
+        .toast.show {
+            opacity: 1;
+            transform: translateX(-50%) translateY(0);
         }
         .note {
-            margin-top: 16px;
-            color: var(--muted);
-            line-height: 1.7;
-            font-size: 14px;
-        }
-        .footer {
-            margin-top: 26px;
-            color: var(--muted);
             font-size: 13px;
-            line-height: 1.7;
+            color: #aaa;
+            line-height: 1.8;
+        }
+        .note code {
+            font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+            font-size: 12px;
+            background: #f0f0f0;
+            padding: 2px 5px;
+            border-radius: 3px;
+            color: #666;
+        }
+        @media (max-width: 480px) {
+            .wrap { padding: 32px 16px 48px; }
+            h1 { font-size: 20px; }
+            .param-label { width: 80px; }
         }
     </style>
 </head>
 <body>
     <div class="wrap">
-        <section class="hero">
-            <div class="badge"><span class="dot"></span> 服务运行中</div>
+        <header>
+            <div class="status">运行中</div>
             <h1>VLESS 节点后台</h1>
-            <p class="sub">当前页面用于查看连接参数、协议类型、路径信息与部署状态。</p>
+            <p class="desc">查看连接参数与部署状态</p>
+        </header>
 
-            <div class="grid">
-${cards}
+        <section>
+            <div class="section-title">连接参数</div>
+            <div class="card">
+                <table>
+${rows}
+                </table>
             </div>
+        </section>
 
-            <div class="bigbox">
-                <div class="label">VLESS 链接</div>
-                <textarea id="vlessLink" readonly>${escapeHtml(vlessLink)}</textarea>
-                <div class="actions">
-                    <button onclick="copyText('vlessLink')">复制链接</button>
+        <section>
+            <div class="section-title">快速连接</div>
+            <div class="link-box">
+                <div class="link-content" id="vlessLink">${escapeHtml(vlessLink)}</div>
+                <div class="link-actions">
+                    <button class="btn btn-primary" onclick="copyLink()">复制链接</button>
                 </div>
-                <div class="note">
-                    后台打开方式：<span class="mono">${escapeHtml(origin + dashboardPath)}</span><br>
-                    客户端连接参数：地址是当前域名，端口 443，UUID 为上面显示值，传输为 WS，路径为 <span class="mono">/</span>。
-                </div>
             </div>
+        </section>
 
-            <div class="footer">
-                普通访问显示伪装页；访问 <span class="mono">/${escapeHtml(userID)}</span> 显示后台；WebSocket 请求继续走代理通道。
-            </div>
+        <section>
+            <p class="note">
+                直接访问域名显示伪装页面，访问 <code>/${escapeHtml(userID)}</code> 进入后台。<br>
+                客户端配置：地址填域名，端口 <code>443</code>，传输 <code>ws</code>，路径 <code>/</code>。
+            </p>
         </section>
     </div>
 
+    <div class="toast" id="toast">已复制到剪贴板</div>
+
     <script>
-        async function copyText(id) {
-            const el = document.getElementById(id);
-            if (!el) return;
-            const text = el.value || el.textContent || '';
+        function showToast(msg) {
+            const t = document.getElementById('toast');
+            t.textContent = msg;
+            t.classList.add('show');
+            setTimeout(() => t.classList.remove('show'), 1500);
+        }
+        async function copyLink() {
+            const text = document.getElementById('vlessLink').textContent || '';
             try {
                 if (navigator.clipboard && window.isSecureContext) {
                     await navigator.clipboard.writeText(text);
+                    showToast('已复制到剪贴板');
                     return;
                 }
             } catch (_) {}
-            if (typeof el.select === 'function') {
-                el.select();
-                el.setSelectionRange(0, 99999);
-            }
+            const ta = document.createElement('textarea');
+            ta.value = text;
+            ta.style.position = 'fixed';
+            ta.style.opacity = '0';
+            document.body.appendChild(ta);
+            ta.select();
             document.execCommand('copy');
+            document.body.removeChild(ta);
+            showToast('已复制到剪贴板');
         }
     </script>
 </body>
