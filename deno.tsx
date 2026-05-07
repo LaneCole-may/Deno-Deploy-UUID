@@ -4,7 +4,7 @@
 // =========================================================
 
 // 1. 你的专属 UUID
-const userID = "93f6e6d0-9593-4104-8991-f28bb00d59a0";
+const userID = Deno.env.get("UUID") || "";
 
 // 2. 后台路径：域名 + UUID
 const ADMIN_PATH = `/${userID}`;
